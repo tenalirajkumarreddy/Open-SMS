@@ -65,6 +65,58 @@ artifacts-monorepo/
 - `GET /api/logs/stats` — aggregate statistics
 - `GET/PUT /api/settings` — settings
 
+## Android APK — `opensms-android/`
+
+Complete Android Kotlin project for the OpenSMS phone gateway. **NOT** part of the pnpm monorepo — it is a standalone Android Gradle project.
+
+### Build
+- Open `opensms-android/` in Android Studio, or
+- Push to GitHub → GitHub Actions builds APK automatically
+
+### Fonts (must be present before building)
+Place these in `opensms-android/app/src/main/res/font/`:
+- `syne_bold.ttf`, `syne_extrabold.ttf` — from Google Fonts (Syne)
+- `jetbrainsmono_regular.ttf`, `jetbrainsmono_medium.ttf` — from JetBrains
+
+The GitHub Actions CI downloads them automatically.
+
+### Android Stack
+- Kotlin + Jetpack Compose (Material 3)
+- NanoHTTPD 2.3.3 (embedded HTTP server)
+- Hilt DI, EncryptedSharedPreferences
+- Kotlin Channel (queue), ForegroundService, BootReceiver
+- minSdk 26, targetSdk 34
+
+### Android File Structure
+```text
+opensms-android/
+├── app/src/main/
+│   ├── java/dev/opensms/
+│   │   ├── OpenSMSApp.kt, MainActivity.kt
+│   │   ├── di/AppModule.kt
+│   │   ├── http/OpenSMSHttpServer.kt       — NanoHTTPD server, 5 endpoints
+│   │   ├── prefs/AppPreferences.kt         — EncryptedSharedPreferences
+│   │   ├── queue/SmsJob.kt, RateLimiter.kt — Kotlin Channel + token bucket
+│   │   ├── service/SmsGatewayService.kt    — ForegroundService + queue consumer
+│   │   ├── service/BootReceiver.kt         — auto-start on boot
+│   │   ├── sms/SmsSender.kt, SmsResultReceiver.kt, WebhookDispatcher.kt
+│   │   ├── state/MessageLog.kt, MessageRecord.kt, StatsCounter.kt
+│   │   ├── templates/Template.kt, TemplateEngine.kt, TemplateRepository.kt
+│   │   └── ui/screens/ — Setup, Dashboard, Templates, Logs, Settings screens
+│   └── res/
+│       ├── values/strings.xml, themes.xml
+│       └── drawable/ic_sms_notification.xml
+├── .github/workflows/build.yml             — CI: debug APK + signed release on tag
+└── README.md                               — Usage instructions + API examples
+```
+
+### HTTP API (runs on phone)
+- `GET /health` — no auth, returns uptime/queue/stats
+- `POST /send` — Bearer auth, send SMS via template or raw body
+- `GET /status/:id` — message delivery status
+- `GET /templates` — list templates
+- `POST /pause` — pause/resume gateway
+
 ## Packages
 
 ### `artifacts/api-server` (`@workspace/api-server`)
