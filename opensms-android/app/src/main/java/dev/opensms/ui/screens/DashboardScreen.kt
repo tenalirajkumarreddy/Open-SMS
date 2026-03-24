@@ -1,7 +1,7 @@
 package dev.opensms.ui.screens
 
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -14,50 +14,41 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import dev.opensms.state.MessageRecord
-import dev.opensms.state.MessageStatus
 import dev.opensms.ui.theme.OpenSMSColors
 import dev.opensms.ui.theme.statusColor
 import dev.opensms.ui.viewmodel.MainViewModel
+import dev.opensms.websocket.ConnectionStatus
 import java.text.SimpleDateFormat
 import java.util.*
 
 @Composable
 fun DashboardScreen(navController: NavController, vm: MainViewModel = hiltViewModel()) {
-    val clipboard = LocalClipboardManager.current
-    val ip = remember { getLocalIp() }
-    val url = "http://$ip:${vm.prefs.port}"
 
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
             .background(OpenSMSColors.bg)
             .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        // Bottom nav
         item {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                NavButton("Templates", Icons.Default.Message) { navController.navigate("templates") }
-                NavButton("Logs", Icons.Default.List) { navController.navigate("logs") }
-                NavButton("Settings", Icons.Default.Settings) { navController.navigate("settings") }
+                NavChip("Templates", Icons.Default.Message) { navController.navigate("templates") }
+                NavChip("Logs", Icons.Default.List) { navController.navigate("logs") }
+                NavChip("Settings", Icons.Default.Settings) { navController.navigate("settings") }
             }
         }
 
-        // Status card
-        item {
-            StatusCard(vm = vm, url = url, clipboard = clipboard)
-        }
+        item { ConnectionCard(vm = vm) }
 
-        // Stats row
         item {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -69,7 +60,8 @@ fun DashboardScreen(navController: NavController, vm: MainViewModel = hiltViewMo
             }
         }
 
-        // Recent messages
+        item { QueueStatusCard(vm = vm) }
+
         item {
             Text("Recent Messages", style = MaterialTheme.typography.titleMedium, color = OpenSMSColors.text)
         }
@@ -77,23 +69,42 @@ fun DashboardScreen(navController: NavController, vm: MainViewModel = hiltViewMo
         if (vm.recentMessages.isEmpty()) {
             item {
                 Box(
-                    modifier = Modifier.fillMaxWidth().height(80.dp),
+                    modifier = Modifier.fillMaxWidth().height(72.dp),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text("No messages yet", style = MaterialTheme.typography.bodyMedium)
+                    Text("No messages yet", style = MaterialTheme.typography.bodyMedium, color = OpenSMSColors.muted)
                 }
             }
         } else {
-            items(vm.recentMessages) { record ->
-                MessageRow(record)
-            }
+            items(vm.recentMessages) { record -> MessageRow(record) }
         }
     }
 }
 
 @Composable
-private fun StatusCard(vm: MainViewModel, url: String, clipboard: LocalClipboardManager) {
+private fun ConnectionCard(vm: MainViewModel) {
+    val status  = vm.connectionStatus
+    val paused  = vm.isPaused
     val running = vm.isServiceRunning
+
+    val dotColor = when {
+        !running -> OpenSMSColors.muted
+        paused   -> OpenSMSColors.orange
+        status == ConnectionStatus.CONNECTED    -> OpenSMSColors.accent
+        status == ConnectionStatus.RECONNECTING -> OpenSMSColors.orange
+        else     -> OpenSMSColors.red
+    }
+
+    val pulse = rememberInfiniteTransition(label = "pulse")
+    val dotScale by pulse.animateFloat(
+        initialValue = 1f,
+        targetValue  = if (status == ConnectionStatus.CONNECTED && !paused) 1.4f else 1f,
+        animationSpec = infiniteRepeatable(
+            animation  = tween(800, easing = EaseInOut),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "dotScale",
+    )
 
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -101,38 +112,66 @@ private fun StatusCard(vm: MainViewModel, url: String, clipboard: LocalClipboard
         color = OpenSMSColors.surface,
     ) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Box(
                     modifier = Modifier
                         .size(10.dp)
+                        .scale(dotScale)
                         .clip(CircleShape)
-                        .background(if (running) OpenSMSColors.accent else OpenSMSColors.red)
+                        .background(dotColor)
                 )
-                Text(
-                    if (running) "Gateway Running" else "Gateway Stopped",
-                    style = MaterialTheme.typography.titleMedium,
-                )
-                Spacer(Modifier.weight(1f))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = when {
+                            !running -> "Gateway Stopped"
+                            paused   -> "Gateway Paused"
+                            status == ConnectionStatus.CONNECTED    -> "Connected"
+                            status == ConnectionStatus.RECONNECTING -> "Reconnecting…"
+                            status == ConnectionStatus.CONNECTING   -> "Connecting…"
+                            else     -> "Disconnected"
+                        },
+                        style = MaterialTheme.typography.titleMedium,
+                        color = OpenSMSColors.text,
+                    )
+                    if (vm.backendDomain.isNotBlank()) {
+                        Text(
+                            vm.backendDomain,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = OpenSMSColors.muted,
+                        )
+                    }
+                }
                 Switch(
                     checked = running,
                     onCheckedChange = { if (it) vm.startGateway() else vm.stopGateway() },
-                    colors = SwitchDefaults.colors(checkedThumbColor = OpenSMSColors.bg, checkedTrackColor = OpenSMSColors.accent),
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = OpenSMSColors.bg,
+                        checkedTrackColor = OpenSMSColors.accent,
+                    ),
                 )
             }
 
             if (running) {
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(OpenSMSColors.surface2, RoundedCornerShape(6.dp))
-                        .border(1.dp, OpenSMSColors.border, RoundedCornerShape(6.dp))
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Text(url, style = MaterialTheme.typography.labelSmall, color = OpenSMSColors.accent)
-                    IconButton(onClick = { clipboard.setText(AnnotatedString(url)) }, modifier = Modifier.size(24.dp)) {
-                        Icon(Icons.Default.ContentCopy, contentDescription = "Copy URL", tint = OpenSMSColors.muted, modifier = Modifier.size(16.dp))
+                    OutlinedButton(
+                        onClick = { vm.togglePause() },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = if (paused) OpenSMSColors.accent else OpenSMSColors.orange,
+                        ),
+                        shape = RoundedCornerShape(8.dp),
+                    ) {
+                        Icon(
+                            if (paused) Icons.Default.PlayArrow else Icons.Default.Pause,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(if (paused) "Resume Queue" else "Pause Queue")
                     }
                 }
             }
@@ -141,11 +180,39 @@ private fun StatusCard(vm: MainViewModel, url: String, clipboard: LocalClipboard
 }
 
 @Composable
-private fun StatCard(label: String, value: String, color: androidx.compose.ui.graphics.Color, modifier: Modifier) {
+private fun QueueStatusCard(vm: MainViewModel) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(10.dp),
+        color = OpenSMSColors.surface,
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            Icon(Icons.Default.List, contentDescription = null, tint = OpenSMSColors.muted, modifier = Modifier.size(18.dp))
+            Text("Queue", style = MaterialTheme.typography.bodyMedium, color = OpenSMSColors.muted)
+            Spacer(Modifier.weight(1f))
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(vm.queueDepth.toString(), style = MaterialTheme.typography.titleMedium, color = OpenSMSColors.orange)
+                Text("Pending", style = MaterialTheme.typography.bodyMedium, color = OpenSMSColors.muted)
+            }
+        }
+    }
+}
+
+@Composable
+private fun StatCard(
+    label: String,
+    value: String,
+    color: androidx.compose.ui.graphics.Color,
+    modifier: Modifier,
+) {
     Surface(modifier = modifier, shape = RoundedCornerShape(10.dp), color = OpenSMSColors.surface) {
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(value, style = MaterialTheme.typography.headlineMedium, color = color)
-            Text(label, style = MaterialTheme.typography.bodyMedium)
+            Text(label, style = MaterialTheme.typography.bodyMedium, color = OpenSMSColors.muted)
         }
     }
 }
@@ -162,32 +229,29 @@ private fun MessageRow(record: MessageRecord) {
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Box(
-                modifier = Modifier.size(8.dp).clip(CircleShape)
-                    .background(statusColor(record.status.name))
-            )
+            Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(statusColor(record.status.name)))
             Column(modifier = Modifier.weight(1f)) {
-                Text(record.toMasked, style = MaterialTheme.typography.bodyMedium)
+                Text(record.toMasked, style = MaterialTheme.typography.bodyMedium, color = OpenSMSColors.text)
                 Text(
                     record.body.take(60) + if (record.body.length > 60) "…" else "",
                     style = MaterialTheme.typography.bodyMedium,
                     color = OpenSMSColors.muted2,
                 )
             }
-            Text(
-                formatTimestamp(record.enqueuedAt),
-                style = MaterialTheme.typography.labelSmall,
-            )
+            Text(formatTime(record.enqueuedAt), style = MaterialTheme.typography.labelSmall, color = OpenSMSColors.muted)
         }
     }
 }
 
 @Composable
-private fun NavButton(label: String, icon: androidx.compose.ui.graphics.vector.ImageVector, onClick: () -> Unit) {
+private fun NavChip(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    onClick: () -> Unit,
+) {
     OutlinedButton(
         onClick = onClick,
-        modifier = Modifier.height(40.dp),
-        border = ButtonDefaults.outlinedButtonBorder(enabled = true).copy(brush = null),
+        modifier = Modifier.height(38.dp),
         colors = ButtonDefaults.outlinedButtonColors(contentColor = OpenSMSColors.text),
         shape = RoundedCornerShape(8.dp),
     ) {
@@ -197,13 +261,5 @@ private fun NavButton(label: String, icon: androidx.compose.ui.graphics.vector.I
     }
 }
 
-private fun formatTimestamp(millis: Long): String {
-    val sdf = SimpleDateFormat("HH:mm", Locale.getDefault())
-    return sdf.format(Date(millis))
-}
-
-private fun getLocalIp(): String {
-    return try {
-        java.net.InetAddress.getLocalHost().hostAddress ?: "192.168.1.x"
-    } catch (_: Exception) { "192.168.1.x" }
-}
+private fun formatTime(millis: Long): String =
+    SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(millis))

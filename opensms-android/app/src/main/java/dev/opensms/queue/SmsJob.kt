@@ -5,6 +5,5 @@ data class SmsJob(
     val to: String,
     val body: String,
     val templateName: String? = null,
-    val webhookUrl: String? = null,
     val enqueuedAt: Long = System.currentTimeMillis(),
 )

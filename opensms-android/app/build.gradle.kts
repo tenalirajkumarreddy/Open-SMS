@@ -14,8 +14,8 @@ android {
         applicationId = "dev.opensms"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "3.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -38,7 +38,6 @@ android {
 
     signingConfigs {
         create("release") {
-            // Set via environment variables in CI or local keystore.properties
             val keystoreFile = System.getenv("KEYSTORE_FILE")
             val keystorePassword = System.getenv("KEYSTORE_PASSWORD")
             val keyAlias = System.getenv("KEY_ALIAS")
@@ -84,9 +83,12 @@ dependencies {
     implementation(libs.hilt.navigation.compose)
     ksp(libs.hilt.compiler)
     implementation(libs.security.crypto)
-    implementation(libs.nanohttpd)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.gson)
-    implementation(libs.work.runtime.ktx)
+    implementation(libs.okhttp)
+    implementation(libs.mlkit.barcode.scanning)
+    implementation(libs.camera.camera2)
+    implementation(libs.camera.lifecycle)
+    implementation(libs.camera.view)
     debugImplementation(libs.androidx.ui.tooling)
 }
