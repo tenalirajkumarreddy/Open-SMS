@@ -29,17 +29,21 @@ class AppPreferences @Inject constructor(@ApplicationContext private val context
         }
     }
 
-    var isSetupComplete: Boolean
-        get() = prefs.getBoolean(KEY_SETUP_COMPLETE, false)
-        set(value) = prefs.edit().putBoolean(KEY_SETUP_COMPLETE, value).apply()
+    var isConfigured: Boolean
+        get() = prefs.getBoolean(KEY_CONFIGURED, false)
+        set(value) = prefs.edit().putBoolean(KEY_CONFIGURED, value).apply()
 
-    var port: Int
-        get() = prefs.getInt(KEY_PORT, 8080)
-        set(value) = prefs.edit().putInt(KEY_PORT, value).apply()
+    var wsUrl: String
+        get() = prefs.getString(KEY_WS_URL, "") ?: ""
+        set(value) = prefs.edit().putString(KEY_WS_URL, value).apply()
 
     var apiKey: String
-        get() = prefs.getString(KEY_API_KEY, null) ?: generateAndSaveApiKey()
+        get() = prefs.getString(KEY_API_KEY, "") ?: ""
         set(value) = prefs.edit().putString(KEY_API_KEY, value).apply()
+
+    var deviceId: String
+        get() = prefs.getString(KEY_DEVICE_ID, null) ?: generateAndSaveDeviceId()
+        set(value) = prefs.edit().putString(KEY_DEVICE_ID, value).apply()
 
     var autoStart: Boolean
         get() = prefs.getBoolean(KEY_AUTO_START, true)
@@ -53,42 +57,38 @@ class AppPreferences @Inject constructor(@ApplicationContext private val context
         get() = prefs.getInt(KEY_SMS_PER_MINUTE, 10)
         set(value) = prefs.edit().putInt(KEY_SMS_PER_MINUTE, value).apply()
 
-    var webhookUrl: String
-        get() = prefs.getString(KEY_WEBHOOK_URL, "") ?: ""
-        set(value) = prefs.edit().putString(KEY_WEBHOOK_URL, value).apply()
+    fun backendDomain(): String {
+        if (wsUrl.isBlank()) return ""
+        return runCatching {
+            wsUrl.removePrefix("wss://").removePrefix("ws://").substringBefore("/")
+        }.getOrElse { wsUrl }
+    }
 
-    var ipAllowlist: String
-        get() = prefs.getString(KEY_IP_ALLOWLIST, "") ?: ""
-        set(value) = prefs.edit().putString(KEY_IP_ALLOWLIST, value).apply()
-
-    fun regenerateApiKey(): String {
-        val key = generateApiKey()
-        apiKey = key
-        return key
+    fun disconnect() {
+        prefs.edit()
+            .putBoolean(KEY_CONFIGURED, false)
+            .putString(KEY_WS_URL, "")
+            .putString(KEY_API_KEY, "")
+            .apply()
     }
 
     fun reset() {
         prefs.edit().clear().apply()
     }
 
-    private fun generateAndSaveApiKey(): String {
-        val key = generateApiKey()
-        prefs.edit().putString(KEY_API_KEY, key).apply()
-        return key
+    private fun generateAndSaveDeviceId(): String {
+        val id = UUID.randomUUID().toString()
+        prefs.edit().putString(KEY_DEVICE_ID, id).apply()
+        return id
     }
 
-    private fun generateApiKey(): String =
-        UUID.randomUUID().toString().replace("-", "") +
-                UUID.randomUUID().toString().replace("-", "").take(0)
-
     companion object {
-        private const val KEY_SETUP_COMPLETE = "setup_complete"
-        private const val KEY_PORT = "port"
-        private const val KEY_API_KEY = "api_key"
-        private const val KEY_AUTO_START = "auto_start"
+        private const val KEY_CONFIGURED    = "configured"
+        private const val KEY_WS_URL        = "ws_url"
+        private const val KEY_API_KEY       = "api_key"
+        private const val KEY_DEVICE_ID     = "device_id"
+        private const val KEY_AUTO_START    = "auto_start"
         private const val KEY_NOTIFY_FAILURE = "notify_failure"
         private const val KEY_SMS_PER_MINUTE = "sms_per_minute"
-        private const val KEY_WEBHOOK_URL = "webhook_url"
-        private const val KEY_IP_ALLOWLIST = "ip_allowlist"
     }
 }
