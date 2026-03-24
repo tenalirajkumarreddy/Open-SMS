@@ -1,24 +1,23 @@
 package dev.opensms.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.ClipboardManager
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
@@ -26,48 +25,39 @@ import dev.opensms.ui.theme.OpenSMSColors
 import dev.opensms.ui.viewmodel.MainViewModel
 
 @Composable
-fun SettingsScreen(navController: NavController, vm: MainViewModel = hiltViewModel()) {
-    val prefs = vm.prefs
+fun SettingsScreen(
+    navController: NavController,
+    onDisconnect: () -> Unit,
+    vm: MainViewModel = hiltViewModel(),
+) {
+    val prefs    = vm.prefs
     val clipboard = LocalClipboardManager.current
+    val context  = LocalContext.current
 
-    var port by remember { mutableStateOf(prefs.port.toString()) }
-    var apiKey by remember { mutableStateOf(prefs.apiKey) }
-    var showApiKey by remember { mutableStateOf(false) }
-    var autoStart by remember { mutableStateOf(prefs.autoStart) }
+    var autoStart       by remember { mutableStateOf(prefs.autoStart) }
     var notifyOnFailure by remember { mutableStateOf(prefs.notifyOnFailure) }
-    var smsRateLimit by remember { mutableStateOf(prefs.smsPerMinute.toFloat()) }
-    var webhookUrl by remember { mutableStateOf(prefs.webhookUrl) }
-    var showResetDialog by remember { mutableStateOf(false) }
-    var showRegenerateDialog by remember { mutableStateOf(false) }
+    var smsRateLimit    by remember { mutableStateOf(prefs.smsPerMinute.toFloat()) }
 
-    if (showResetDialog) {
+    var testPhone   by remember { mutableStateOf("") }
+    var testResult  by remember { mutableStateOf<String?>(null) }
+    var testRunning by remember { mutableStateOf(false) }
+
+    var showDisconnectDialog by remember { mutableStateOf(false) }
+
+    if (showDisconnectDialog) {
         AlertDialog(
-            onDismissRequest = { showResetDialog = false },
-            title = { Text("Reset Gateway") },
-            text = { Text("This will clear all config and stop the service. Are you sure?") },
+            onDismissRequest = { showDisconnectDialog = false },
+            title = { Text("Disconnect Gateway") },
+            text  = { Text("This will disconnect from your backend, clear the saved QR data, and return to the Connect screen. Logs are also cleared.") },
             confirmButton = {
                 TextButton(onClick = {
-                    vm.resetAll()
-                    navController.navigate("setup") { popUpTo("dashboard") { inclusive = true } }
-                }) { Text("Reset", color = OpenSMSColors.red) }
+                    vm.disconnect()
+                    onDisconnect()
+                }) { Text("Disconnect", color = OpenSMSColors.red) }
             },
-            dismissButton = { TextButton(onClick = { showResetDialog = false }) { Text("Cancel") } },
-            containerColor = OpenSMSColors.surface,
-        )
-    }
-
-    if (showRegenerateDialog) {
-        AlertDialog(
-            onDismissRequest = { showRegenerateDialog = false },
-            title = { Text("Regenerate API Key") },
-            text = { Text("This will invalidate your current API key. All integrations will need to be updated.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    apiKey = vm.regenerateApiKey()
-                    showRegenerateDialog = false
-                }) { Text("Regenerate", color = OpenSMSColors.orange) }
+            dismissButton = {
+                TextButton(onClick = { showDisconnectDialog = false }) { Text("Cancel") }
             },
-            dismissButton = { TextButton(onClick = { showRegenerateDialog = false }) { Text("Cancel") } },
             containerColor = OpenSMSColors.surface,
         )
     }
@@ -84,95 +74,201 @@ fun SettingsScreen(navController: NavController, vm: MainViewModel = hiltViewMod
             IconButton(onClick = { navController.popBackStack() }) {
                 Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = OpenSMSColors.muted)
             }
-            Text("Settings", style = MaterialTheme.typography.headlineMedium)
+            Text("Settings", style = MaterialTheme.typography.headlineMedium, color = OpenSMSColors.text)
         }
 
-        // Server Config
-        SettingsSection("Server Config") {
-            OutlinedTextField(
-                value = port,
-                onValueChange = { port = it.filter { c -> c.isDigit() }.take(5) },
-                label = { Text("HTTP Port") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            )
+        SettingsSection("Connection") {
+            InfoRow("Backend", prefs.backendDomain().ifBlank { "Not connected" })
+            InfoRow("Device ID", prefs.deviceId, copyable = true, clipboard = clipboard)
 
-            // API Key row
-            OutlinedTextField(
-                value = apiKey,
-                onValueChange = {},
-                label = { Text("API Key") },
+            Row(
                 modifier = Modifier.fillMaxWidth(),
-                readOnly = true,
-                singleLine = true,
-                visualTransformation = if (showApiKey) VisualTransformation.None else PasswordVisualTransformation(),
-                trailingIcon = {
-                    Row {
-                        IconButton(onClick = { showApiKey = !showApiKey }) {
-                            Text(if (showApiKey) "Hide" else "Show", style = MaterialTheme.typography.labelSmall, color = OpenSMSColors.muted)
-                        }
-                        IconButton(onClick = { clipboard.setText(AnnotatedString(apiKey)) }) {
-                            Icon(Icons.Default.ContentCopy, contentDescription = "Copy", tint = OpenSMSColors.muted, modifier = Modifier.size(18.dp))
-                        }
-                        IconButton(onClick = { showRegenerateDialog = true }) {
-                            Icon(Icons.Default.Refresh, contentDescription = "Regenerate", tint = OpenSMSColors.orange, modifier = Modifier.size(18.dp))
-                        }
-                    }
-                },
-            )
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedButton(
+                    onClick = { vm.reconnectNow() },
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(8.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = OpenSMSColors.accent),
+                ) {
+                    Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Reconnect Now")
+                }
 
-            Button(
-                onClick = {
-                    prefs.port = port.toIntOrNull() ?: prefs.port
-                    prefs.webhookUrl = webhookUrl
-                    if (vm.isServiceRunning) { vm.stopGateway(); vm.startGateway() }
-                },
-                colors = ButtonDefaults.buttonColors(containerColor = OpenSMSColors.indigo),
-                modifier = Modifier.fillMaxWidth(),
-            ) { Text("Save & Restart Service") }
+                Button(
+                    onClick = {
+                        navController.navigate("connect") {
+                            popUpTo("dashboard") { inclusive = false }
+                        }
+                    },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(containerColor = OpenSMSColors.indigoDim),
+                    shape = RoundedCornerShape(8.dp),
+                ) {
+                    Icon(Icons.Default.QrCodeScanner, contentDescription = null, modifier = Modifier.size(16.dp), tint = OpenSMSColors.indigo)
+                    Spacer(Modifier.width(6.dp))
+                    Text("Scan New QR", color = OpenSMSColors.indigo)
+                }
+            }
         }
 
-        // Behaviour
         SettingsSection("Behaviour") {
-            SettingToggleRow("Auto-start on Boot", autoStart) {
+            ToggleRow("Auto-start on Boot", autoStart) {
                 autoStart = it; prefs.autoStart = it
             }
-            SettingToggleRow("Notify on Failure", notifyOnFailure) {
+            ToggleRow("Notify on Failure", notifyOnFailure) {
                 notifyOnFailure = it; prefs.notifyOnFailure = it
             }
-            Column {
-                Text("SMS Rate Limit: ${smsRateLimit.toInt()}/min", style = MaterialTheme.typography.bodyMedium)
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    "SMS Rate Limit: ${smsRateLimit.toInt()}/min",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = OpenSMSColors.text,
+                )
                 Slider(
                     value = smsRateLimit,
                     onValueChange = { smsRateLimit = it },
                     onValueChangeFinished = { prefs.smsPerMinute = smsRateLimit.toInt() },
                     valueRange = 1f..60f,
-                    colors = SliderDefaults.colors(thumbColor = OpenSMSColors.accent, activeTrackColor = OpenSMSColors.accent),
+                    colors = SliderDefaults.colors(
+                        thumbColor = OpenSMSColors.accent,
+                        activeTrackColor = OpenSMSColors.accent,
+                    ),
                 )
             }
         }
 
-        // Webhook
-        SettingsSection("Webhook") {
+        SettingsSection("Test SMS") {
+            Text(
+                "Send a real SMS to verify your SIM is active and the gateway works.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = OpenSMSColors.muted,
+            )
             OutlinedTextField(
-                value = webhookUrl,
-                onValueChange = { webhookUrl = it },
-                label = { Text("Webhook URL (optional)") },
+                value = testPhone,
+                onValueChange = { testPhone = it },
+                label = { Text("Phone number (E.164)") },
+                placeholder = { Text("+919876543210") },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-                placeholder = { Text("https://yourapp.com/webhooks/sms") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                colors = settingsTextFieldColors(),
+            )
+            testResult?.let { result ->
+                val isSuccess = result.startsWith("Test SMS sent")
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp),
+                    color = if (isSuccess) OpenSMSColors.accentDim else OpenSMSColors.redDim,
+                ) {
+                    Text(
+                        result,
+                        modifier = Modifier.padding(12.dp),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (isSuccess) OpenSMSColors.accent else OpenSMSColors.red,
+                    )
+                }
+            }
+            Button(
+                onClick = {
+                    testRunning = true
+                    testResult  = null
+                    vm.sendTestSms(testPhone) { success, msg ->
+                        testResult  = msg
+                        testRunning = false
+                    }
+                },
+                enabled = testPhone.isNotBlank() && !testRunning && vm.isServiceRunning,
+                colors = ButtonDefaults.buttonColors(containerColor = OpenSMSColors.accent),
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(8.dp),
+            ) {
+                if (testRunning) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), color = OpenSMSColors.bg, strokeWidth = 2.dp)
+                    Spacer(Modifier.width(8.dp))
+                }
+                Text(if (testRunning) "Sending…" else "Send Test SMS", color = OpenSMSColors.bg)
+            }
+            if (!vm.isServiceRunning) {
+                Text(
+                    "Start the gateway first to send a test SMS.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = OpenSMSColors.orange,
+                )
+            }
+        }
+
+        SettingsSection("Data") {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = { vm.clearLogs() },
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(8.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = OpenSMSColors.muted),
+                ) { Text("Clear Logs") }
+
+                Button(
+                    onClick = { vm.exportLogs(context) },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(containerColor = OpenSMSColors.indigoDim),
+                    shape = RoundedCornerShape(8.dp),
+                ) {
+                    Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp), tint = OpenSMSColors.indigo)
+                    Spacer(Modifier.width(6.dp))
+                    Text("Export CSV", color = OpenSMSColors.indigo)
+                }
+            }
+        }
+
+        SettingsSection("Danger Zone") {
+            Button(
+                onClick = { showDisconnectDialog = true },
+                colors = ButtonDefaults.buttonColors(containerColor = OpenSMSColors.redDim),
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(8.dp),
+            ) {
+                Icon(Icons.Default.LinkOff, contentDescription = null, modifier = Modifier.size(16.dp), tint = OpenSMSColors.red)
+                Spacer(Modifier.width(8.dp))
+                Text("Disconnect", color = OpenSMSColors.red)
+            }
+            Text(
+                "Clears saved QR data and returns to the Connect screen.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = OpenSMSColors.muted,
             )
         }
 
-        // Danger zone
-        SettingsSection("Danger Zone") {
-            Button(
-                onClick = { showResetDialog = true },
-                colors = ButtonDefaults.buttonColors(containerColor = OpenSMSColors.redDim),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Reset Gateway", color = OpenSMSColors.red)
+        Spacer(Modifier.height(32.dp))
+    }
+}
+
+@Composable
+private fun InfoRow(
+    label: String,
+    value: String,
+    copyable: Boolean = false,
+    clipboard: ClipboardManager? = null,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            "$label:",
+            style = MaterialTheme.typography.bodyMedium,
+            color = OpenSMSColors.muted,
+        )
+        Text(
+            value,
+            style = MaterialTheme.typography.labelSmall,
+            color = OpenSMSColors.accent,
+            modifier = Modifier.weight(1f),
+        )
+        if (copyable && clipboard != null) {
+            IconButton(onClick = { clipboard.setText(AnnotatedString(value)) }, modifier = Modifier.size(28.dp)) {
+                Icon(Icons.Default.ContentCopy, contentDescription = "Copy", tint = OpenSMSColors.muted, modifier = Modifier.size(16.dp))
             }
         }
     }
@@ -180,8 +276,15 @@ fun SettingsScreen(navController: NavController, vm: MainViewModel = hiltViewMod
 
 @Composable
 private fun SettingsSection(title: String, content: @Composable ColumnScope.() -> Unit) {
-    Surface(shape = RoundedCornerShape(12.dp), color = OpenSMSColors.surface, modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = OpenSMSColors.surface,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
             Text(title, style = MaterialTheme.typography.titleMedium, color = OpenSMSColors.accent)
             content()
         }
@@ -189,17 +292,30 @@ private fun SettingsSection(title: String, content: @Composable ColumnScope.() -
 }
 
 @Composable
-private fun SettingToggleRow(label: String, checked: Boolean, onToggle: (Boolean) -> Unit) {
+private fun ToggleRow(label: String, checked: Boolean, onToggle: (Boolean) -> Unit) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(label, style = MaterialTheme.typography.bodyMedium)
+        Text(label, style = MaterialTheme.typography.bodyMedium, color = OpenSMSColors.text)
         Switch(
             checked = checked,
             onCheckedChange = onToggle,
-            colors = SwitchDefaults.colors(checkedThumbColor = OpenSMSColors.bg, checkedTrackColor = OpenSMSColors.accent),
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = OpenSMSColors.bg,
+                checkedTrackColor = OpenSMSColors.accent,
+            ),
         )
     }
 }
+
+@Composable
+private fun settingsTextFieldColors() = OutlinedTextFieldDefaults.colors(
+    focusedBorderColor = OpenSMSColors.accent,
+    unfocusedBorderColor = OpenSMSColors.border,
+    focusedTextColor = OpenSMSColors.text,
+    unfocusedTextColor = OpenSMSColors.text,
+    cursorColor = OpenSMSColors.accent,
+)
+
