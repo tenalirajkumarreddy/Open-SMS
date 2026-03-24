@@ -1,15 +1,15 @@
 package dev.opensms.ui.navigation
 
 import androidx.compose.runtime.Composable
+import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import dev.opensms.ui.screens.ConnectScreen
 import dev.opensms.ui.screens.DashboardScreen
 import dev.opensms.ui.screens.LogsScreen
-import dev.opensms.ui.screens.SetupScreen
 import dev.opensms.ui.screens.SettingsScreen
 import dev.opensms.ui.screens.TemplatesScreen
-import androidx.hilt.navigation.compose.hiltViewModel
 import dev.opensms.ui.viewmodel.MainViewModel
 
 @Composable
@@ -19,11 +19,15 @@ fun OpenSMSNavHost() {
 
     NavHost(
         navController = navController,
-        startDestination = if (mainVm.isSetupComplete) "dashboard" else "setup",
+        startDestination = if (mainVm.isConfigured) "dashboard" else "connect",
     ) {
-        composable("setup") {
-            SetupScreen(
-                onSetupComplete = { navController.navigate("dashboard") { popUpTo("setup") { inclusive = true } } }
+        composable("connect") {
+            ConnectScreen(
+                onConnected = {
+                    navController.navigate("dashboard") {
+                        popUpTo("connect") { inclusive = true }
+                    }
+                }
             )
         }
         composable("dashboard") {
@@ -36,7 +40,14 @@ fun OpenSMSNavHost() {
             LogsScreen(navController = navController)
         }
         composable("settings") {
-            SettingsScreen(navController = navController)
+            SettingsScreen(
+                navController = navController,
+                onDisconnect = {
+                    navController.navigate("connect") {
+                        popUpTo("dashboard") { inclusive = true }
+                    }
+                }
+            )
         }
     }
 }
