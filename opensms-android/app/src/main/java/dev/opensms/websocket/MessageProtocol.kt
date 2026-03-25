@@ -62,8 +62,16 @@ object MessageParser {
         gson.fromJson(text, JobMessage::class.java)
     }.getOrNull()
 
-    fun parseQRPayload(text: String): QRPayload? = runCatching {
-        val payload = gson.fromJson(text, QRPayload::class.java)
-        if (payload.wsUrl.isNotBlank() && payload.apiKey.isNotBlank()) payload else null
-    }.getOrNull()
+    fun parseQRPayload(text: String): QRPayload? =
+        // v4 format: base64-encoded JSON (from qrcode-terminal in the developer's terminal)
+        runCatching {
+            val decoded = String(android.util.Base64.decode(text.trim(), android.util.Base64.DEFAULT))
+            val payload = gson.fromJson(decoded, QRPayload::class.java)
+            if (payload.wsUrl.isNotBlank() && payload.apiKey.isNotBlank()) payload else null
+        }.getOrNull()
+        // v3 format: raw JSON (from /opensms/qr HTML page) — kept for backwards compatibility
+        ?: runCatching {
+            val payload = gson.fromJson(text, QRPayload::class.java)
+            if (payload.wsUrl.isNotBlank() && payload.apiKey.isNotBlank()) payload else null
+        }.getOrNull()
 }
