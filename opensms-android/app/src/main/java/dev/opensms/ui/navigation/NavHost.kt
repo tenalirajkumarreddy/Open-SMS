@@ -18,7 +18,7 @@ fun OpenSMSNavHost() {
     val mainVm: MainViewModel = hiltViewModel()
 
     NavHost(
-        navController = navController,
+        navController    = navController,
         startDestination = if (mainVm.isConfigured) "dashboard" else "connect",
     ) {
         composable("connect") {
@@ -42,7 +42,7 @@ fun OpenSMSNavHost() {
         composable("settings") {
             SettingsScreen(
                 navController = navController,
-                onDisconnect = {
+                onDisconnect  = {
                     navController.navigate("connect") {
                         popUpTo("dashboard") { inclusive = true }
                     }
