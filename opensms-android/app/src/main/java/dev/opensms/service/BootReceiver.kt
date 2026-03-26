@@ -16,7 +16,7 @@ class BootReceiver : BroadcastReceiver() {
         val action = intent.action
         if ((action == Intent.ACTION_BOOT_COMPLETED ||
                     action == Intent.ACTION_MY_PACKAGE_REPLACED) &&
-            prefs.autoStart && prefs.isSetupComplete
+            prefs.autoStartOnBoot && prefs.hasCredentials
         ) {
             SmsGatewayService.start(context)
         }
