@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.hilt)
     alias(libs.plugins.ksp)
 }
@@ -14,8 +15,8 @@ android {
         applicationId = "dev.opensms"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "3.0.0"
+        versionCode = 3
+        versionName = "5.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -79,16 +80,26 @@ dependencies {
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
     implementation(libs.androidx.material.icons)
+
     implementation(libs.hilt.android)
     implementation(libs.hilt.navigation.compose)
     ksp(libs.hilt.compiler)
+
     implementation(libs.security.crypto)
     implementation(libs.kotlinx.coroutines.android)
-    implementation(libs.gson)
-    implementation(libs.okhttp)
+
+    implementation(platform(libs.supabase.bom))
+    implementation(libs.supabase.realtime)
+    implementation(libs.supabase.postgrest)
+    implementation(libs.ktor.client.android)
+
+    implementation(libs.kotlinx.serialization.json)
+    implementation(libs.kotlinx.datetime)
+
     implementation(libs.mlkit.barcode.scanning)
     implementation(libs.camera.camera2)
     implementation(libs.camera.lifecycle)
     implementation(libs.camera.view)
+
     debugImplementation(libs.androidx.ui.tooling)
 }
