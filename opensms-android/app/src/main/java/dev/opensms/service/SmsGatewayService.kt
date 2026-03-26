@@ -12,55 +12,55 @@ import androidx.core.app.NotificationCompat
 import dagger.hilt.android.AndroidEntryPoint
 import dev.opensms.MainActivity
 import dev.opensms.R
+import dev.opensms.data.CircularBuffer
+import dev.opensms.data.GatewayStats
+import dev.opensms.data.StatsCounter
+import dev.opensms.data.model.SmsJob
+import dev.opensms.data.model.SmsJobDto
+import dev.opensms.data.model.SmsJobRecord
 import dev.opensms.prefs.AppPreferences
-import dev.opensms.queue.SmsJob
-import dev.opensms.queue.TokenBucketRateLimiter
+import dev.opensms.relay.ConnectionStatus
+import dev.opensms.relay.RelayClient
 import dev.opensms.sms.SmsSender
-import dev.opensms.state.MessageLog
-import dev.opensms.state.MessageRecord
-import dev.opensms.state.MessageStatus
-import dev.opensms.state.StatsCounter
-import dev.opensms.state.maskPhone
+import dev.opensms.templates.TemplateEngine
 import dev.opensms.templates.TemplateRepository
-import dev.opensms.websocket.ConnectionStatus
-import dev.opensms.websocket.RelayClient
+import io.github.jan.tennert.supabase.postgrest.from
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.channels.BufferOverflow
-import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
-import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.datetime.Clock
 import javax.inject.Inject
 
 @AndroidEntryPoint
 class SmsGatewayService : Service() {
 
     @Inject lateinit var prefs: AppPreferences
-    @Inject lateinit var templateRepo: TemplateRepository
-    @Inject lateinit var messageLog: MessageLog
-    @Inject lateinit var stats: StatsCounter
     @Inject lateinit var smsSender: SmsSender
+    @Inject lateinit var templateRepo: TemplateRepository
 
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private lateinit var relayClient: RelayClient
 
-    private val jobChannel = Channel<SmsJob>(
-        capacity = 1000,
-        onBufferOverflow = BufferOverflow.SUSPEND,
-    )
+    private val messageLog = CircularBuffer<SmsJobRecord>(500)
+    private val stats      = StatsCounter()
 
     companion object {
-        const val NOTIF_ID   = 1001
-        const val CHANNEL_ID = "opensms_gateway"
+        const val ACTION_UPDATE_CREDENTIALS = "dev.opensms.UPDATE_CREDENTIALS"
+        const val ACTION_STOP               = "dev.opensms.STOP"
+        const val NOTIFICATION_ID           = 1001
+        const val CHANNEL_ID                = "opensms_gateway"
 
-        var isRunning         = false
-            private set
-        var isPaused          = false
-        var connectionStatus  = ConnectionStatus.DISCONNECTED
-        var backendDomain     = ""
-        val queueDepth        = AtomicInteger(0)
+        val statusFlow     = MutableStateFlow(ConnectionStatus.DISCONNECTED)
+        val recentJobsFlow = MutableStateFlow<List<SmsJobRecord>>(emptyList())
+        val allJobsFlow    = MutableStateFlow<List<SmsJobRecord>>(emptyList())
+        val statsFlow      = MutableStateFlow(GatewayStats())
+        val serviceRunning = MutableStateFlow(false)
+
+        @Volatile var isPaused = false
+        var serviceStartTime   = 0L
 
         fun start(context: Context) {
             context.startForegroundService(Intent(context, SmsGatewayService::class.java))
@@ -73,93 +73,164 @@ class SmsGatewayService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        isRunning    = true
-        isPaused     = false
-        backendDomain = prefs.backendDomain()
-        queueDepth.set(0)
+        serviceStartTime = System.currentTimeMillis()
+        serviceRunning.value = true
+        isPaused = false
         createNotificationChannel()
-        startForeground(NOTIF_ID, buildNotification())
-        startRelayClient()
-        launchQueueConsumer()
+        startForeground(NOTIFICATION_ID, buildNotification())
+        initRelayClient()
     }
 
-    private fun startRelayClient() {
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            ACTION_UPDATE_CREDENTIALS -> {
+                val url = intent.getStringExtra("supabase_url") ?: return START_STICKY
+                val key = intent.getStringExtra("anon_key")     ?: return START_STICKY
+                serviceScope.launch { relayClient.reconnectWithNewCredentials(url, key) }
+            }
+            ACTION_STOP -> stopSelf()
+        }
+        return START_STICKY
+    }
+
+    private fun initRelayClient() {
         relayClient = RelayClient(
-            wsUrl        = prefs.wsUrl,
-            apiKey       = prefs.apiKey,
-            deviceId     = prefs.deviceId,
-            templateRepo = templateRepo,
-            scope        = scope,
-            onJob        = { job ->
-                queueDepth.incrementAndGet()
-                jobChannel.trySend(job)
-                updateNotification()
-            },
-            onStatusChanged = { status ->
-                connectionStatus = status
+            supabaseUrl = prefs.supabaseUrl,
+            anonKey     = prefs.anonKey,
+            onJob       = { dto -> serviceScope.launch { processJob(dto) } },
+            onStatus    = { status ->
+                statusFlow.value = status
                 updateNotification()
             },
         )
-        relayClient.connect()
+        serviceScope.launch { relayClient.connect() }
     }
 
-    private fun launchQueueConsumer() = scope.launch(Dispatchers.IO) {
-        val rateLimiter = TokenBucketRateLimiter(prefs.smsPerMinute)
+    private suspend fun processJob(dto: SmsJobDto) {
+        if (isPaused) return
 
-        for (job in jobChannel) {
-            while (isPaused) { kotlinx.coroutines.delay(500) }
+        val claimed = claimJob(dto.id) ?: return
 
-            queueDepth.decrementAndGet()
-            updateNotification()
+        val body = when {
+            claimed.templateName != null -> {
+                val tmpl = templateRepo.get(claimed.templateName)
+                    ?: run {
+                        reportStatus(claimed.id, "failed", "template_not_found:${claimed.templateName}")
+                        return
+                    }
+                try {
+                    TemplateEngine.render(tmpl.body, claimed.templateVars ?: emptyMap())
+                } catch (e: Exception) {
+                    reportStatus(claimed.id, "failed", "template_error:${e.message}")
+                    return
+                }
+            }
+            !claimed.body.isNullOrBlank() -> claimed.body
+            else -> {
+                reportStatus(claimed.id, "failed", "empty_body")
+                return
+            }
+        }
 
-            val record = MessageRecord(
-                messageId    = job.messageId,
-                to           = job.to,
-                toMasked     = maskPhone(job.to),
-                templateName = job.templateName,
-                body         = job.body,
-                status       = MessageStatus.PROCESSING,
-            )
-            messageLog.add(record)
+        val smsJob = SmsJob(id = claimed.id, toPhone = claimed.toPhone, body = body)
+        val record = SmsJobRecord(smsJob, "processing")
+        messageLog.add(record)
+        refreshFlows()
 
-            rateLimiter.acquire()
+        smsSender.send(
+            context     = this,
+            job         = smsJob,
+            onSent      = {
+                reportStatus(smsJob.id, "sent")
+                messageLog.updateStatus(smsJob.id, "sent")
+                stats.increment("sent")
+                refreshFlows()
+            },
+            onDelivered = {
+                reportStatus(smsJob.id, "delivered")
+                messageLog.updateStatus(smsJob.id, "delivered")
+                stats.increment("delivered")
+                refreshFlows()
+            },
+            onFailed    = { err ->
+                reportStatus(smsJob.id, "failed", err)
+                messageLog.updateStatus(smsJob.id, "failed", err)
+                stats.increment("failed")
+                refreshFlows()
+                if (prefs.notifyOnFailure) notifyFailure(smsJob.toPhone, err)
+            },
+        )
+    }
 
-            smsSender.send(
-                job = job,
-                onSent = {
-                    messageLog.update(job.messageId, MessageStatus.SENT)
-                    stats.incrementSent()
-                    relayClient.sendStatus(job.messageId, "sent")
-                    updateNotification()
-                },
-                onDelivered = {
-                    messageLog.update(job.messageId, MessageStatus.DELIVERED)
-                    relayClient.sendStatus(job.messageId, "delivered")
-                    updateNotification()
-                },
-                onFailed = { reason ->
-                    messageLog.update(job.messageId, MessageStatus.FAILED, reason)
-                    stats.incrementFailed()
-                    relayClient.sendStatus(job.messageId, "failed", reason)
-                    updateNotification()
-                    if (prefs.notifyOnFailure) notifyFailure(job.to, reason)
-                },
-            )
+    private suspend fun claimJob(jobId: String): SmsJobDto? {
+        return try {
+            val current = relayClient.client.from("sms_jobs")
+                .select { filter { eq("id", jobId) } }
+                .decodeSingleOrNull<SmsJobDto>()
+
+            if (current?.status != "pending") return null
+
+            relayClient.client.from("sms_jobs")
+                .update({ set("status", "processing") }) {
+                    filter {
+                        eq("id", jobId)
+                        eq("status", "pending")
+                    }
+                }
+
+            relayClient.client.from("sms_jobs")
+                .select { filter { eq("id", jobId) } }
+                .decodeSingleOrNull<SmsJobDto>()
+                ?.takeIf { it.status == "processing" }
+        } catch (e: Exception) {
+            null
         }
     }
 
-    override fun onDestroy() {
-        isRunning        = false
-        isPaused         = false
-        connectionStatus = ConnectionStatus.DISCONNECTED
-        queueDepth.set(0)
-        relayClient.destroy()
-        jobChannel.close()
-        scope.cancel()
-        super.onDestroy()
+    private fun reportStatus(jobId: String, status: String, error: String? = null) {
+        serviceScope.launch {
+            try {
+                val now = Clock.System.now().toString()
+                relayClient.client.from("sms_jobs")
+                    .update({
+                        when (status) {
+                            "sent"      -> { set("status", "sent"); set("sent_at", now) }
+                            "delivered" -> { set("status", "delivered"); set("delivered_at", now) }
+                            else        -> {
+                                set("status", "failed")
+                                if (error != null) set("error", error)
+                            }
+                        }
+                    }) {
+                        filter { eq("id", jobId) }
+                    }
+            } catch (_: Exception) {}
+        }
     }
 
-    override fun onBind(intent: Intent?): IBinder? = null
+    private fun refreshFlows() {
+        val all = messageLog.toList()
+        allJobsFlow.value    = all
+        recentJobsFlow.value = all.take(10)
+        statsFlow.value      = stats.toStats()
+    }
+
+    private fun updateNotification() {
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.notify(NOTIFICATION_ID, buildNotification())
+    }
+
+    private fun notifyFailure(toPhone: String, reason: String) {
+        val masked = maskPhone(toPhone)
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("SMS Failed")
+            .setContentText("Failed to $masked: $reason")
+            .setSmallIcon(R.drawable.ic_sms)
+            .setAutoCancel(true)
+            .build()
+        getSystemService(NotificationManager::class.java)
+            .notify((System.currentTimeMillis() % Int.MAX_VALUE).toInt(), notification)
+    }
 
     private fun buildNotification(): Notification {
         val openIntent = PendingIntent.getActivity(
@@ -167,46 +238,49 @@ class SmsGatewayService : Service() {
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val statusText = when (connectionStatus) {
-            ConnectionStatus.CONNECTED    -> "Connected to $backendDomain"
-            ConnectionStatus.RECONNECTING -> "Reconnecting to $backendDomain…"
-            ConnectionStatus.CONNECTING   -> "Connecting to $backendDomain…"
+        val statusText = when (statusFlow.value) {
+            ConnectionStatus.CONNECTED    -> "Connected · ${stats.sentToday} sent today"
+            ConnectionStatus.RECONNECTING -> "Reconnecting…"
+            ConnectionStatus.CONNECTING   -> "Connecting…"
             ConnectionStatus.DISCONNECTED -> "Disconnected"
         }
-        val pausedSuffix = if (isPaused) " • PAUSED" else ""
-
+        val domain = prefs.supabaseDomain()
+        val title  = "OpenSMS Gateway${if (isPaused) " · PAUSED" else ""}"
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("● OpenSMS  •  ${stats.sentToday()} sent today$pausedSuffix")
-            .setContentText(statusText)
-            .setSmallIcon(R.drawable.ic_sms_notification)
+            .setContentTitle(title)
+            .setContentText(if (domain.isNotBlank()) "$statusText — $domain" else statusText)
+            .setSmallIcon(R.drawable.ic_sms)
             .setContentIntent(openIntent)
             .setOngoing(true)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .build()
     }
 
-    private fun updateNotification() {
-        getSystemService(NotificationManager::class.java).notify(NOTIF_ID, buildNotification())
-    }
-
-    private fun notifyFailure(to: String, reason: String) {
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("SMS Failed")
-            .setContentText("Failed to ${maskPhone(to)}: $reason")
-            .setSmallIcon(R.drawable.ic_sms_notification)
-            .setAutoCancel(true)
-            .build()
-        getSystemService(NotificationManager::class.java)
-            .notify((System.currentTimeMillis() % Int.MAX_VALUE).toInt(), notification)
-    }
-
     private fun createNotificationChannel() {
         val channel = NotificationChannel(
-            CHANNEL_ID, "SMS Gateway", NotificationManager.IMPORTANCE_LOW
+            CHANNEL_ID,
+            "SMS Gateway",
+            NotificationManager.IMPORTANCE_LOW,
         ).apply {
-            description = "OpenSMS gateway service"
+            description = "OpenSMS background gateway"
             setShowBadge(false)
         }
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
     }
+
+    override fun onDestroy() {
+        serviceRunning.value = false
+        statusFlow.value     = ConnectionStatus.DISCONNECTED
+        isPaused             = false
+        relayClient.disconnect()
+        serviceScope.cancel()
+        super.onDestroy()
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+}
+
+private fun maskPhone(phone: String): String {
+    if (phone.length <= 4) return phone
+    return phone.dropLast(4).replace(Regex("\\d"), "*") + phone.takeLast(4)
 }
