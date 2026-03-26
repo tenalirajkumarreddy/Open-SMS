@@ -2,25 +2,22 @@ package dev.opensms.ui.viewmodel
 
 import android.app.Application
 import android.content.Context
+import android.content.Intent
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dev.opensms.data.GatewayStats
+import dev.opensms.data.model.SmsJob
+import dev.opensms.data.model.SmsJobRecord
 import dev.opensms.prefs.AppPreferences
-import dev.opensms.queue.SmsJob
+import dev.opensms.relay.ConnectionStatus
 import dev.opensms.service.SmsGatewayService
 import dev.opensms.sms.SmsSender
-import dev.opensms.state.MessageLog
-import dev.opensms.state.MessageRecord
-import dev.opensms.state.StatsCounter
 import dev.opensms.templates.Template
 import dev.opensms.templates.TemplateRepository
-import dev.opensms.util.CsvExporter
-import dev.opensms.websocket.ConnectionStatus
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.UUID
 import javax.inject.Inject
@@ -29,76 +26,61 @@ import javax.inject.Inject
 class MainViewModel @Inject constructor(
     application: Application,
     val prefs: AppPreferences,
-    private val messageLog: MessageLog,
-    private val stats: StatsCounter,
     private val templateRepo: TemplateRepository,
     private val smsSender: SmsSender,
 ) : AndroidViewModel(application) {
 
-    val isConfigured: Boolean get() = prefs.isConfigured
+    val isConfigured: Boolean get() = prefs.hasCredentials
 
-    var isServiceRunning by mutableStateOf(SmsGatewayService.isRunning)
+    var isServiceRunning by mutableStateOf(SmsGatewayService.serviceRunning.value)
         private set
 
     var isPaused by mutableStateOf(SmsGatewayService.isPaused)
         private set
 
-    var connectionStatus by mutableStateOf(SmsGatewayService.connectionStatus)
+    var connectionStatus by mutableStateOf(SmsGatewayService.statusFlow.value)
         private set
 
-    var backendDomain by mutableStateOf(prefs.backendDomain())
+    var recentMessages by mutableStateOf<List<SmsJobRecord>>(emptyList())
         private set
 
-    var queueDepth by mutableStateOf(0)
+    var allMessages by mutableStateOf<List<SmsJobRecord>>(emptyList())
         private set
 
-    var recentMessages by mutableStateOf<List<MessageRecord>>(emptyList())
-        private set
-
-    var allMessages by mutableStateOf<List<MessageRecord>>(emptyList())
+    var stats by mutableStateOf(SmsGatewayService.statsFlow.value)
         private set
 
     var templates by mutableStateOf<List<Template>>(emptyList())
         private set
 
-    var sentToday by mutableStateOf(0)
-        private set
-
-    var sentThisWeek by mutableStateOf(0)
-        private set
-
-    var failedTotal by mutableStateOf(0)
-        private set
+    val supabaseDomain: String get() = prefs.supabaseDomain()
 
     init {
-        startPolling()
+        collectFlows()
         refreshTemplates()
     }
 
-    private fun startPolling() = viewModelScope.launch {
-        while (isActive) {
-            isServiceRunning  = SmsGatewayService.isRunning
-            isPaused          = SmsGatewayService.isPaused
-            connectionStatus  = SmsGatewayService.connectionStatus
-            backendDomain     = prefs.backendDomain()
-            queueDepth        = SmsGatewayService.queueDepth.get()
-            recentMessages    = messageLog.getRecent(10)
-            allMessages       = messageLog.getAll()
-            sentToday         = stats.sentToday()
-            sentThisWeek      = stats.sentThisWeek()
-            failedTotal       = stats.failedTotal()
-            delay(1000)
+    private fun collectFlows() {
+        viewModelScope.launch {
+            SmsGatewayService.serviceRunning.collect { isServiceRunning = it }
+        }
+        viewModelScope.launch {
+            SmsGatewayService.statusFlow.collect { connectionStatus = it }
+        }
+        viewModelScope.launch {
+            SmsGatewayService.recentJobsFlow.collect { recentMessages = it }
+        }
+        viewModelScope.launch {
+            SmsGatewayService.allJobsFlow.collect { allMessages = it }
+        }
+        viewModelScope.launch {
+            SmsGatewayService.statsFlow.collect { stats = it }
         }
     }
 
-    fun refreshTemplates() {
-        templates = templateRepo.getAll()
-    }
-
-    fun connectFromQR(wsUrl: String, apiKey: String) {
-        prefs.wsUrl   = wsUrl
-        prefs.apiKey  = apiKey
-        prefs.isConfigured = true
+    fun connect(url: String, anonKey: String) {
+        prefs.supabaseUrl = url.trim()
+        prefs.anonKey     = anonKey.trim()
         startGateway()
     }
 
@@ -118,11 +100,18 @@ class MainViewModel @Inject constructor(
     }
 
     fun reconnectNow() {
-        stopGateway()
-        viewModelScope.launch {
-            delay(300)
-            startGateway()
+        if (prefs.hasCredentials) {
+            val intent = Intent(getApplication<Application>(), SmsGatewayService::class.java).apply {
+                action = SmsGatewayService.ACTION_UPDATE_CREDENTIALS
+                putExtra("supabase_url", prefs.supabaseUrl)
+                putExtra("anon_key", prefs.anonKey)
+            }
+            getApplication<Application>().startService(intent)
         }
+    }
+
+    fun refreshTemplates() {
+        templates = templateRepo.getAll()
     }
 
     fun saveTemplate(template: Template) {
@@ -136,24 +125,23 @@ class MainViewModel @Inject constructor(
     }
 
     fun clearLogs() {
-        messageLog.clear()
         allMessages   = emptyList()
         recentMessages = emptyList()
     }
 
     fun exportLogs(context: Context) {
-        CsvExporter.shareAsCsv(context, allMessages)
+        // TODO: implement CSV export for SmsJobRecord
     }
 
     fun sendTestSms(to: String, onResult: (Boolean, String) -> Unit) {
         viewModelScope.launch {
             val job = SmsJob(
-                messageId    = "test_${UUID.randomUUID().toString().take(8)}",
-                to           = to,
-                body         = "OpenSMS test message. Your gateway is working!",
-                templateName = null,
+                id      = "test_${UUID.randomUUID().toString().take(8)}",
+                toPhone = to,
+                body    = "OpenSMS test message. Your gateway is working correctly!",
             )
             smsSender.send(
+                context     = getApplication(),
                 job         = job,
                 onSent      = { onResult(true, "Test SMS sent successfully!") },
                 onDelivered = {},
@@ -164,7 +152,6 @@ class MainViewModel @Inject constructor(
 
     fun disconnect() {
         stopGateway()
-        messageLog.clear()
-        prefs.disconnect()
+        prefs.clearCredentials()
     }
 }
