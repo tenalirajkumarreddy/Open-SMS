@@ -1,8 +1,13 @@
 package dev.opensms.templates
 
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
+
+@Serializable
 data class Template(
     val name: String,
     val body: String,
 ) {
-    val vars: List<String> get() = TemplateEngine.extractVars(body)
+    @Transient
+    val vars: List<String> = TemplateEngine.extractVars(body)
 }
