@@ -48,8 +48,13 @@
         </receiver>
 
         <receiver
-            android:name=".sms.SmsResultReceiver"
-            android:exported="false" />
+            android:name=".sms.DeliveryReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="dev.opensms.SMS_SENT" />
+                <action android:name="dev.opensms.SMS_DELIVERED" />
+            </intent-filter>
+        </receiver>
 
         <provider
             android:name="androidx.core.content.FileProvider"
